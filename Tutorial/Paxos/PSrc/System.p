@@ -45,6 +45,7 @@ machine Proposer {
                 value = payload.accepted;
             }
             assert highestBallot >= payload.prev;
+            // assert forall (a: machine) :: a in p1bReceived ==> p1bReceived[a].ballot <= highestBallot;
             p1bReceived[payload.acceptor] = MkPair(payload.prev, payload.accepted);
             if (isQuorum(p1bReceived)) {
                 foreach (acceptor in acceptors())
@@ -182,17 +183,26 @@ init Aux.voted == default(map[machine, set[tBVPair]]);
 init Aux.proposed == default(map[machine, tBVPair]);
 init Aux.decided == default(map[machine, tBVPair]);
 invariant proposer_has_ballot: forall (p: Proposer) :: hasBallot(p, p.ballot);
+invariant votes_are_acceptors: forall (p: Proposer, a: machine) :: a in p.p2bReceived ==> a in acceptors();
+invariant promises_are_acceptors: forall (p: Proposer, a: machine) :: a in p.p1bReceived ==> a in acceptors();
 
 pure one_b_max(a: machine, b1: tBallot, b2: tBallot, v: tValue): bool = a in Aux.one_b_max && (b1=b1, b2=b2, v=v) in Aux.one_b_max[a];
 pure proposed(b: tBallot, v: tValue): bool = (proposerOf(b) in Aux.proposed) && Aux.proposed[proposerOf(b)] == MkPair(b, v);
 pure voted(a: machine, b: tBallot, v: tValue): bool = a in Aux.voted && MkPair(b, v) in Aux.voted[a];
 pure decided(b: tBallot, v: tValue): bool = proposerOf(b) in Aux.decided && Aux.decided[proposerOf(b)] == MkPair(b, v);
 
+invariant acceptor_votes: forall (a: machine, b: tBallot, v: tValue) :: voted(a, b, v) ==> a in acceptors() && proposerOf(b) in proposers();
+invariant acceptor_promise: forall (a: machine, b1: tBallot, b2: tBallot, v: tValue) :: one_b_max(a, b1, b2, v) ==> a in acceptors() && proposerOf(b1) in proposers();
+
+// Relationships between predicates and event sent
 invariant p1b_means_one_b_max: forall (e: eP1B) :: sent e ==> one_b_max(e.acceptor, e.promised, e.prev, e.accepted);
-invariant one_b_max_measn_sent: forall (a: machine, b1: tBallot, b2: tBallot, v: tValue) :: one_b_max(a, b1, b2, v) ==> exists (e: eP1B) :: sent e && e.acceptor == a && e.promised == b1 && e.prev == b2 && e.accepted == v;
+invariant one_b_max_means_sent: forall (a: machine, b1: tBallot, b2: tBallot, v: tValue) :: one_b_max(a, b1, b2, v) ==> exists (e: eP1B) :: sent e && e.acceptor == a && e.promised == b1 && e.prev == b2 && e.accepted == v;
 
 invariant p2b_means_voting: forall (e: eP2B) :: sent e ==> voted(e.acceptor, e.ballot, e.value);
 invariant voted_means_p2b:  forall (a: machine, b: tBallot, v: tValue) :: voted(a, b, v) ==> exists (e: eP2B) :: sent e && e.acceptor == a && e.ballot == b && e.value == v;
+
+// invariant p2a_means_proposing: forall (e: eP2A) :: sent e ==> proposed(e.ballot, e.value);
+// invariant proposed_means_p2a:  forall (b: tBallot, v: tValue) :: proposed(b, v) ==> exists (e: eP2A) :: sent e && e.ballot == b && e.value == v;
 
 // Debug use
 init forall (p1: machine, p2: machine) :: p1 in proposers() && p2 in proposers() ==> p1 == p2;
@@ -202,8 +212,14 @@ invariant debug: forall (p1: machine, p2: machine) :: p1 in proposers() && p2 in
 invariant one_value_decided: forall (x: eDecide, y: eDecide) :: sent x && sent y ==> x.value == y.value;
 
 // Aux
-invariant decided_by_quorum: forall (e: eDecide, p: Proposer) :: sent e && e.proposer == p ==> isQuorum(p.p2bReceived);
+invariant decided_by_quorum: forall (e: eDecide, p: Proposer) :: sent e && e.proposer == p ==> isQuorum(p.p2bReceived) && forall (a: machine) :: a in p.p2bReceived ==> voted(a, e.ballot, e.value);
 invariant propose_decision: forall (e1: eDecide, e2: eP2A) :: sent e1 && sent e2 && e2.ballot >= e1.ballot ==> e1.value == e2.value;
+invariant p1bReceived_means_one_b_max: forall (p: Proposer, a: machine) ::
+                            a in p.p1bReceived ==> one_b_max(a, p.ballot, p.p1bReceived[a].ballot, p.p1bReceived[a].value);
+invariant highest_ballot_running_max: forall (p: Proposer, a: machine) :: a in p.p1bReceived ==> p.highestBallot >= p.p1bReceived[a].ballot;
+
+invariant p2bReceived_means_voted: forall (p: Proposer, a: machine) :: a in p.p2bReceived ==> voted(a, p.p2bReceived[a].ballot, p.p2bReceived[a].value);
+invariant single_proposal_per_ballot: forall (e1: eP2A, e2: eP2A) :: sent e1 && sent e2 && e1.ballot == e2.ballot ==> e1.value == e2.value;
 
 /* Facts about events*/
 // eP1A
@@ -216,16 +232,15 @@ invariant p1b_targets_proposers: forall (e: eP1B, m: machine) :: e targets m && 
 invariant p1b_sent_by_acceptors: forall (e: eP1B, m: machine) :: e.acceptor == m && !(m in acceptors()) ==> !sent e;
 invariant p1b_updates_promise: forall (e: eP1B, a: Acceptor) :: sent e && e.acceptor == a ==> e.promised <= a.promised;
 invariant p1b_prev_round:      forall (e: eP1B) :: sent e ==> e.promised > e.prev;
+invariant p1b_promise_ballot:  forall (e: eP1B, p: Proposer) :: sent e ==> (e targets p) == (e.promised == p.ballot);
 invariant p1b_may_has_accepted:forall (e: eP1B) :: sent e ==> (e.prev == nullBallot()) == (e.accepted == nullValue());
-// Failed to prove
-// invariant p1b_received_means_sent: forall (p: Proposer, e: eP1B, a: machine) ::
-//                                                    a in p.p1bReceived && e.acceptor == a ==> sent e;
 
 // eP2A
-invariant p2a_targets_acceptors: forall (e: eP2A, m: machine) :: e targets m && !(m in acceptors()) ==> !(sent e);
-invariant p2a_sent_by_proposers: forall (e: eP2A) :: sent e ==> e.proposer in proposers();
+invariant p2a_targets_acceptors:   forall (e: eP2A, m: machine) :: e targets m && !(m in acceptors()) ==> !(sent e);
+invariant p2a_sent_by_proposers:   forall (e: eP2A) :: sent e ==> e.proposer in proposers();
 invariant p2a_sent_not_in_prepare: forall (e: eP2A, m: Proposer) :: sent e && e.proposer == m ==> !(m is Prepare);
-invariant p2a_valid_values:      forall (e: eP2A, p: Proposer) :: sent e && e.proposer == p ==> e.ballot == p.ballot && e.value == p.value && e.ballot > nullBallot() && e.value != nullValue();
+invariant p2a_valid_values:        forall (e: eP2A, p: Proposer) :: sent e && e.proposer == p ==> e.ballot == p.ballot && e.value == p.value && e.ballot > nullBallot() && e.value != nullValue();
+invariant p2a_ballot_values:       forall (e: eP2A, p: Proposer) :: sent e ==> (e.proposer == p) == (e.ballot == p.ballot && e.value == p.value);
 
 // eP2B
 invariant p2b_targets_proposers: forall (e: eP2B, m: machine) :: e targets m && !(m in proposers()) ==> !sent e;
@@ -234,6 +249,7 @@ invariant p2b_updates_promise:   forall (e: eP2B, a: Acceptor) :: sent e && e.ac
 invariant p2b_means_proposing:   forall (e: eP2B, p: Proposer) :: sent e && e targets p ==> !(p is Prepare);
 invariant p2b_valid_values:      forall (e1: eP2B, p: Proposer) :: sent e1 && e1 targets p ==> e1.ballot == p.ballot && e1.value == p.value;
 invariant p2b_updates_prev:      forall (e: eP2B, a: Acceptor, p: Proposer) :: sent e && e.ballot == a.prevBallot && p == proposerOf(e.ballot) ==> !(p is Prepare);
+invariant p2b_ballot_values:     forall (e: eP2B, p: Proposer) :: sent e ==> e targets p == (e.ballot == p.ballot && e.value == p.value);
 // invariant p2b_means_voted:       forall (e: eP2B, a: Acceptor) :: (sent e && e.acceptor == a) == (MkPair(e.ballot, e.value) in a.voted);
 
 // eDecide
@@ -242,9 +258,16 @@ invariant decision_valid: forall (e: eDecide, p: Proposer) :: sent e && e.propos
 invariant decision_from_propose: forall (e1: eDecide, e2: eP2A) :: sent e1 && sent e2 && e1.proposer == e2.proposer ==> e1.ballot == e2.ballot && e1.value == e2.value;
 invariant done_after_decision: forall (e: eDecide, p: Proposer) :: sent e && e.proposer == p ==> p is Done;
 
+// Proposer states
+invariant highest_ballot_valid: forall (p: Proposer) :: p.highestBallot >= nullBallot();
+invariant vote_received_same:   forall (p: Proposer, a: machine) :: a in p.p2bReceived ==> p.p2bReceived[a].ballot == p.ballot && p.p2bReceived[a].value == p.value;
+
 // Acceptor states
+invariant prev_ballot_valid_ge_null: forall (a: Acceptor) :: a.prevBallot >= nullBallot();
 invariant promised_ge_accepted: forall (a: Acceptor) :: a.promised >= a.prevBallot;
 invariant value_ballot_pair: forall (a: Acceptor) :: (a.prevBallot == nullBallot()) == (a.prevValue == nullValue());
 invariant prev_ballot_valid: forall (a: Acceptor) :: (a.prevBallot != nullBallot()) ==> proposerOf(a.prevBallot) in proposers();
+// invariant proposer_state_implied:  forall (a: Acceptor, p: Proposer) :: a.prevBallot != nullBallot() && p == proposerOf(a.prevBallot) ==> (p is Proposing || p is Done);
+// invariant prev_value_valid: forall (a: Acceptor, p: Proposer) :: a.prevBallot != nullBallot() && p == proposerOf(a.prevBallot) ==> p.value == a.prevValue;
 // cannot verify
 // invariant prev_value_valid: forall (a: Acceptor, p: Proposer) :: a.prevBallot != nullBallot() && p == proposerOf(a.prevBallot) ==> (p is Proposing || p is Done);
